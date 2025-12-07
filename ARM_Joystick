@@ -1,0 +1,65 @@
+#include <Servo.h>
+
+Servo servo_1;
+Servo servo_2;
+Servo servo_3;
+Servo servo_4;
+
+const int joyLeftX = A0;  
+const int joyLeftY = A1; 
+const int joyRightX = A2; 
+const int joyRightY = A3; 
+
+int Angle_1 = 90;
+int Angle_2 = 120;
+int Angle_3 =180;
+int Angle_4 = 0;
+
+const int deadZone = 200;  
+const int loopSpeed = 20;  
+
+void setup() {
+ 
+  servo_1.attach(3);
+  servo_2.attach(5);
+  servo_3.attach(6);
+  servo_4.attach(9);
+
+  updateServos();
+}
+
+void loop() {
+
+  int Val_1 = analogRead(joyLeftX); 
+  int Val_2 = analogRead(joyLeftY); 
+  int Val_3 = analogRead(joyRightX); 
+  int Val_4 = analogRead(joyRightY); 
+
+  if (Val_1 < (512 - deadZone)) Angle_1++;
+  else if (Val_1 > (512 + deadZone)) Angle_1--;
+
+  if (Val_2 < (512 - deadZone)) Angle_2++;
+  else if (Val_2 > (512 + deadZone)) Angle_2--;
+
+  if (Val_3 < (512 - deadZone)) Angle_3--;
+  else if (Val_3 > (512 + deadZone)) Angle_3++;
+
+ 
+  if (Val_4 < (512 - deadZone)) Angle_4++;
+  else if (Val_4 > (512 + deadZone)) Angle_4--;
+
+  Angle_1 = constrain(Angle_1, 0, 180);
+  Angle_2 = constrain(Angle_2, 0, 180);
+  Angle_3 = constrain(Angle_3, 0, 180);
+  Angle_4 = constrain(Angle_4, 10, 180); 
+  
+  updateServos();
+  delay(loopSpeed);
+}
+
+void updateServos() {
+  servo_1.write(Angle_1);
+  servo_2.write(Angle_2);
+  servo_3.write(Angle_3);
+  servo_4.write(Angle_4);
+}
