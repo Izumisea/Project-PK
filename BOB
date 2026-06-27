@@ -1,0 +1,350 @@
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+#include <Servo.h>
+#include <SPI.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SH110X.h>
+
+// --- WI-FI SETUP ---
+const char* ssid = "Robot_Control"; 
+const char* password = "";          
+ESP8266WebServer server(80); 
+
+// --- SERVO SETUP ---
+Servo rightLeg;
+Servo leftLeg;
+Servo rightFoot;
+Servo leftFoot;
+
+const int RIGHT_LEG_PIN = 14;  // D5
+const int LEFT_LEG_PIN = 12;   // D6
+const int RIGHT_FOOT_PIN = 13; // D7
+const int LEFT_FOOT_PIN = 15;  // D8
+
+const int CENTER = 90;
+const int TILT_RIGHT = 120;
+const int TILT_LEFT = 60;
+const int STEP_DELAY = 12;  
+
+// State tracking 
+char currentCommand = 'S'; 
+bool isStanding = false;
+unsigned long lastBlinkTime = 0; 
+
+// --- OLED SETUP ---
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+#define SCREEN_ADDRESS 0x3C 
+Adafruit_SH1106G display = Adafruit_SH1106G(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+const int ref_eye_height = 40;
+const int ref_eye_width = 40;
+const int ref_space_between_eye = 10;
+const int ref_corner_radius = 10;
+
+int left_eye_height = ref_eye_height, left_eye_width = ref_eye_width;
+int right_eye_height = ref_eye_height, right_eye_width = ref_eye_width;
+int left_eye_x = 32, left_eye_y = 32;
+int right_eye_x = 32 + ref_eye_width + ref_space_between_eye, right_eye_y = 32;
+
+// --- OLED ANIMATION FUNCTIONS --- //
+
+void draw_eyes(bool update = true) {
+  display.clearDisplay();        
+  display.fillRoundRect(left_eye_x - left_eye_width / 2, left_eye_y - left_eye_height / 2, 
+                        left_eye_width, left_eye_height, ref_corner_radius, SH110X_WHITE);
+  display.fillRoundRect(right_eye_x - right_eye_width / 2, right_eye_y - right_eye_height / 2, 
+                        right_eye_width, right_eye_height, ref_corner_radius, SH110X_WHITE);    
+  if(update) display.display();
+}
+
+void center_eyes(bool update = true) {
+  left_eye_height = right_eye_height = ref_eye_height;
+  left_eye_width = right_eye_width = ref_eye_width;
+  left_eye_x = SCREEN_WIDTH / 2 - ref_eye_width / 2 - ref_space_between_eye / 2;
+  right_eye_x = SCREEN_WIDTH / 2 + ref_eye_width / 2 + ref_space_between_eye / 2;
+  left_eye_y = right_eye_y = SCREEN_HEIGHT / 2;
+  draw_eyes(update);
+}
+
+void blink(int speed = 12) {
+  draw_eyes();
+  for(int i = 0; i < 3; i++) {
+    left_eye_height -= speed; right_eye_height -= speed;    
+    draw_eyes(); delay(1);
+  }
+  for(int i = 0; i < 3; i++) {
+    left_eye_height += speed; right_eye_height += speed;
+    draw_eyes(); delay(1);
+  }
+  center_eyes(true);
+}
+
+void sleep_eyes() {
+  left_eye_height = right_eye_height = 2;
+  draw_eyes(true);  
+}
+
+void wakeup() {
+  sleep_eyes();
+  delay(1000);
+  for(int h = 0; h <= ref_eye_height; h += 2) {
+    left_eye_height = right_eye_height = h;
+    draw_eyes(true);
+  }
+}
+
+void happy_eye() {
+  center_eyes(false);
+  int offset = ref_eye_height / 2;
+  
+  for(int i = 0; i < 10; i++) {
+    // Slices from the top down (upside-down eyes)
+    display.fillTriangle(
+        left_eye_x - left_eye_width/2 - 1, left_eye_y - offset, 
+        left_eye_x + left_eye_width/2 + 1, left_eye_y - 5 - offset, 
+        left_eye_x - left_eye_width/2 - 1, left_eye_y - left_eye_height - offset, 
+        SH110X_BLACK
+    );
+    
+    display.fillTriangle(
+        right_eye_x + right_eye_width/2 + 1, right_eye_y - offset, 
+        right_eye_x - left_eye_width/2 - 1, right_eye_y - 5 - offset, 
+        right_eye_x + right_eye_width/2 + 1, right_eye_y - left_eye_height - offset, 
+        SH110X_BLACK
+    );  
+    
+    offset -= 2; 
+    display.display(); 
+    delay(1);
+  }
+  
+  // The feet tippy-tap dance
+  for (int i = 0; i < 3; i++) {
+    smoothMove2(rightFoot, TILT_RIGHT, leftFoot, TILT_RIGHT); 
+    smoothMove2(rightFoot, TILT_LEFT, leftFoot, TILT_LEFT);   
+  }
+  
+  stand(); 
+  center_eyes(true);
+}
+
+void demon_mode() {
+  center_eyes(false);
+  
+  display.fillTriangle(
+    left_eye_x - left_eye_width / 2, left_eye_y + left_eye_height / 2, 
+    left_eye_x + left_eye_width / 2, left_eye_y,                       
+    left_eye_x + left_eye_width / 2, left_eye_y + left_eye_height / 2, 
+    SH110X_BLACK
+  );
+  
+  display.fillTriangle(
+    right_eye_x + right_eye_width / 2, right_eye_y + right_eye_height / 2, 
+    right_eye_x - right_eye_width / 2, right_eye_y,                        
+    right_eye_x - right_eye_width / 2, right_eye_y + right_eye_height / 2, 
+    SH110X_BLACK
+  );
+  
+  display.display();
+  delay(2000); 
+  center_eyes(true);
+}
+
+void saccade(int dir_x, int dir_y) {
+  int move_x = 8 * dir_x, move_y = 6 * dir_y, blink_amp = 8;
+  for(int phase = 0; phase < 2; phase++) {
+    left_eye_x += move_x; right_eye_x += move_x;    
+    left_eye_y += move_y; right_eye_y += move_y;    
+    int modifier = (phase == 0) ? -blink_amp : blink_amp;
+    right_eye_height += modifier; left_eye_height += modifier;
+    draw_eyes(); delay(1);
+  }
+}
+
+void random_saccade() {
+  center_eyes(true);
+  for(int i = 0; i < 15; i++) { 
+    int dir_x = random(-1, 2), dir_y = random(-1, 2);
+    saccade(dir_x, dir_y); delay(50);
+    saccade(-dir_x, -dir_y); delay(50);     
+  }
+  center_eyes(true);
+}
+
+
+// --- THE WEBPAGE (HTML + CSS + JS) ---
+const char MAIN_page[] PROGMEM = R"=====(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0">
+  <style>
+    body { font-family: Arial; text-align: center; margin: 0; padding: 20px; background-color: #222; color: white; touch-action: manipulation; }
+    h1 { font-size: 24px; margin-bottom: 20px; }
+    .btn { background-color: #4CAF50; border: none; color: white; padding: 20px; text-align: center; 
+           font-size: 18px; border-radius: 10px; font-weight: bold; width: 100%; box-sizing: border-box; }
+    .btn:active { transform: scale(0.95); }
+    .stop-btn { background-color: #f44336; }
+    .expr-btn { background-color: #9c27b0; padding: 15px; font-size: 16px; }
+    .demon-btn { background-color: #ff5722; padding: 15px; font-size: 16px; }
+    
+    .d-pad { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; max-width: 350px; margin: 0 auto; }
+    .expr-pad { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; max-width: 350px; margin: 20px auto; padding-top: 20px; border-top: 2px solid #444; }
+    .empty { background: transparent; border: none; }
+  </style>
+</head>
+<body>
+  <h1>Robot Controller</h1>
+  
+  <div class="d-pad">
+    <div class="empty"></div>
+    <button class="btn" onmousedown="start('F')" onmouseup="stop()" ontouchstart="start('F', event)" ontouchend="stop(event)">Forward</button>
+    <div class="empty"></div>
+    
+    <button class="btn" onmousedown="start('L')" onmouseup="stop()" ontouchstart="start('L', event)" ontouchend="stop(event)">Turn L</button>
+    <button class="btn stop-btn" onmousedown="stop()" ontouchstart="stop(event)">STOP</button>
+    <button class="btn" onmousedown="start('R')" onmouseup="stop()" ontouchstart="start('R', event)" ontouchend="stop(event)">Turn R</button>
+    
+    <div class="empty"></div>
+    <button class="btn" onmousedown="start('B')" onmouseup="stop()" ontouchstart="start('B', event)" ontouchend="stop(event)">Back</button>
+    <div class="empty"></div>
+  </div>
+
+  <div class="expr-pad">
+    <button class="btn expr-btn" onclick="trigger('H')">happy</button>
+    <button class="btn demon-btn" onclick="trigger('D')">Demon</button>
+    <button class="btn expr-btn" onclick="trigger('X')">Saccade</button>
+  </div>
+
+  <script>
+    function start(cmd, e) { if (e) e.preventDefault(); fetch('/action?go=' + cmd); }
+    function stop(e) { if (e) e.preventDefault(); fetch('/action?go=S'); }
+    function trigger(cmd) { fetch('/action?go=' + cmd); }
+  </script>
+</body>
+</html>
+)=====";
+
+// --- SETUP ROUTINE ---
+void setup() {
+  Serial.begin(115200);
+  
+  if(!display.begin(SCREEN_ADDRESS, true)) {
+    Serial.println(F("SH1106 allocation failed"));
+  }
+  display.clearDisplay();
+  display.display();
+  
+  rightLeg.attach(RIGHT_LEG_PIN);
+  leftLeg.attach(LEFT_LEG_PIN);
+  rightFoot.attach(RIGHT_FOOT_PIN);
+  leftFoot.attach(LEFT_FOOT_PIN);
+  stand();
+
+  wakeup();
+
+  WiFi.softAP(ssid, password);
+  server.on("/", []() { server.send(200, "text/html", MAIN_page); });
+  
+  server.on("/action", []() {
+    if (server.hasArg("go")) {
+      currentCommand = server.arg("go").charAt(0);
+      isStanding = false; 
+    }
+    server.send(200, "text/plain", "OK");
+  });
+  server.begin();
+}
+
+// --- MAIN LOOP ---
+void loop() {
+  server.handleClient();
+
+  if (currentCommand == 'H') { happy_eye(); currentCommand = 'S'; }
+  else if (currentCommand == 'D') { demon_mode(); currentCommand = 'S'; }
+  else if (currentCommand == 'X') { random_saccade(); currentCommand = 'S'; }
+  
+  else if (currentCommand == 'F') walkForward();
+  else if (currentCommand == 'B') walkBackward();
+  else if (currentCommand == 'R') turnRight();
+  else if (currentCommand == 'L') turnLeft();
+  else if (currentCommand == 'S') {
+    if (!isStanding) {
+      stand();
+      isStanding = true;
+    }
+  }
+
+  if (millis() - lastBlinkTime >= 5000) {
+    if (currentCommand == 'S') { 
+      blink(); 
+    }
+    lastBlinkTime = millis();
+  }
+}
+
+
+// --- SERVO MOVEMENT FUNCTIONS --- //
+
+void stand() { smoothMove4(rightLeg, CENTER, leftLeg, CENTER, rightFoot, CENTER, leftFoot, CENTER); }
+
+void walkForward() {
+  smoothMove2(rightFoot, TILT_RIGHT, leftFoot, TILT_RIGHT); 
+  smoothMove2(leftLeg, 60, rightLeg, 60); 
+  smoothMove2(rightFoot, TILT_LEFT, leftFoot, TILT_LEFT); 
+  smoothMove2(leftLeg, 120, rightLeg, 120); 
+}
+
+void walkBackward() {
+  smoothMove2(rightFoot, TILT_RIGHT, leftFoot, TILT_RIGHT);
+  smoothMove2(leftLeg, 120, rightLeg, 120); 
+  smoothMove2(rightFoot, TILT_LEFT, leftFoot, TILT_LEFT);
+  smoothMove2(leftLeg, 60, rightLeg, 60); 
+}
+
+void turnRight() {
+  smoothMove2(rightFoot, TILT_RIGHT, leftFoot, TILT_RIGHT);
+  smoothMove2(leftLeg, 60, rightLeg, 120); 
+  smoothMove2(rightFoot, TILT_LEFT, leftFoot, TILT_LEFT);
+  smoothMove2(leftLeg, CENTER, rightLeg, CENTER); 
+}
+
+void turnLeft() {
+  smoothMove2(rightFoot, TILT_LEFT, leftFoot, TILT_LEFT);
+  smoothMove2(rightLeg, 120, leftLeg, 60); 
+  smoothMove2(rightFoot, TILT_RIGHT, leftFoot, TILT_RIGHT);
+  smoothMove2(rightLeg, CENTER, leftLeg, CENTER); 
+}
+
+// --- SERVO SMOOTHING ENGINE --- //
+void smoothMove2(Servo &s1, int target1, Servo &s2, int target2) {
+  int start1 = s1.read(); int start2 = s2.read();
+  int maxSteps = max(abs(target1 - start1), abs(target2 - start2));
+  for (int step = 0; step <= maxSteps; step++) {
+    if (maxSteps == 0) break; 
+    s1.write(map(step, 0, maxSteps, start1, target1));
+    s2.write(map(step, 0, maxSteps, start2, target2));
+    
+    server.handleClient();
+    if (currentCommand == 'S') return; 
+    delay(STEP_DELAY); 
+  }
+}
+
+void smoothMove4(Servo &s1, int target1, Servo &s2, int target2, Servo &s3, int target3, Servo &s4, int target4) {
+  int start1 = s1.read(); int start2 = s2.read(); int start3 = s3.read(); int start4 = s4.read();
+  int maxSteps12 = max(abs(target1 - start1), abs(target2 - start2));
+  int maxSteps34 = max(abs(target3 - start3), abs(target4 - start4));
+  int maxSteps = max(maxSteps12, maxSteps34);
+  for (int step = 0; step <= maxSteps; step++) {
+    if (maxSteps == 0) break; 
+    s1.write(map(step, 0, maxSteps, start1, target1));
+    s2.write(map(step, 0, maxSteps, start2, target2));
+    s3.write(map(step, 0, maxSteps, start3, target3));
+    s4.write(map(step, 0, maxSteps, start4, target4));
+    delay(STEP_DELAY); 
+  }
+}
